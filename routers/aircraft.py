@@ -32,8 +32,27 @@ async def list_aircraft(db: AsyncSession = Depends(get_db)):
     return [_row_to_read(r) for r in result.mappings().all()]
 
 
+async def _check_spot_occupied(db: AsyncSession, spot_id, exclude_aircraft_id=None):
+    """Raise 409 if another aircraft already occupies the spot."""
+    if not spot_id:
+        return
+    query = "SELECT id, tail_number FROM aircraft WHERE spot_id = :spot_id"
+    params = {"spot_id": str(spot_id)}
+    if exclude_aircraft_id:
+        query += " AND id != :exclude_id"
+        params["exclude_id"] = str(exclude_aircraft_id)
+    result = await db.execute(text(query), params)
+    existing = result.mappings().first()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Spot already occupied by {existing['tail_number']}"
+        )
+
+
 @router.post("", response_model=AircraftRead, status_code=201)
 async def create_aircraft(body: AircraftCreate, db: AsyncSession = Depends(get_db)):
+    await _check_spot_occupied(db, body.spot_id)
     new_id = str(uuid7())
     await db.execute(
         text(
@@ -66,6 +85,7 @@ async def create_aircraft(body: AircraftCreate, db: AsyncSession = Depends(get_d
 async def move_aircraft(
     aircraft_id: UUID, body: AircraftMoveRequest, db: AsyncSession = Depends(get_db)
 ):
+    await _check_spot_occupied(db, body.spot_id, exclude_aircraft_id=aircraft_id)
     result = await db.execute(
         text(
             "UPDATE aircraft SET lat = :lat, lng = :lng, spot_id = :spot_id, updated_at = NOW() "
