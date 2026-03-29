@@ -9,8 +9,11 @@ from routers import ramps, zones, parking_spots, aircraft, adg_classes, aircraft
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with AsyncSessionLocal() as db:
-        await seed_ramps(db)
+    try:
+        async with AsyncSessionLocal() as db:
+            await seed_ramps(db)
+    except Exception as e:
+        print(f"[startup] Seed failed (DB may not be configured): {e}")
     yield
 
 
