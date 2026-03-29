@@ -18,7 +18,11 @@ app = FastAPI(title="Ramp Management API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "https://pkop-hjhub9dzdeccgthp.canadacentral-01.azurewebsites.net",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
