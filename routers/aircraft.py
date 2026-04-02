@@ -9,17 +9,31 @@ from schemas import AircraftCreate, AircraftMoveRequest, AircraftRead
 
 router = APIRouter(prefix="/api/aircraft", tags=["aircraft"])
 
+# JOIN aircraft_types for make, model, wingspan, length
+_SELECT_QUERY = """
+    SELECT a.id, a.tail_number, a.type_id, t.make, t.model,
+           a.operator, a.lat, a.lng, a.adg_class, a.heading,
+           a.zone_id, t.wingspan_m, t.length_m, a.highlighted
+    FROM aircraft a
+    JOIN aircraft_types t ON a.type_id = t.id
+"""
+
 
 def _row_to_read(row) -> AircraftRead:
     return AircraftRead(
         id=row["id"],
         tail_number=row["tail_number"],
-        type=row["type"],
+        type_id=row["type_id"],
+        make=row["make"],
+        model=row["model"],
         operator=row["operator"],
         lat=row["lat"],
         lng=row["lng"],
         adg_class=row["adg_class"],
-        spot_id=row.get("spot_id"),
+        heading=row.get("heading", 0.0),
+        zone_id=row.get("zone_id"),
+        wingspan_m=row["wingspan_m"],
+        length_m=row.get("length_m"),
         highlighted=row.get("highlighted", False),
     )
 
@@ -27,54 +41,46 @@ def _row_to_read(row) -> AircraftRead:
 @router.get("", response_model=list[AircraftRead])
 async def list_aircraft(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        text("SELECT id, tail_number, type, operator, lat, lng, adg_class, spot_id, highlighted FROM aircraft ORDER BY created_at")
+        text(f"{_SELECT_QUERY} ORDER BY a.created_at")
     )
     return [_row_to_read(r) for r in result.mappings().all()]
 
 
-async def _check_spot_occupied(db: AsyncSession, spot_id, exclude_aircraft_id=None):
-    """Raise 409 if another aircraft already occupies the spot."""
-    if not spot_id:
-        return
-    query = "SELECT id, tail_number FROM aircraft WHERE spot_id = :spot_id"
-    params = {"spot_id": str(spot_id)}
-    if exclude_aircraft_id:
-        query += " AND id != :exclude_id"
-        params["exclude_id"] = str(exclude_aircraft_id)
-    result = await db.execute(text(query), params)
-    existing = result.mappings().first()
-    if existing:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Spot already occupied by {existing['tail_number']}"
-        )
-
-
 @router.post("", response_model=AircraftRead, status_code=201)
 async def create_aircraft(body: AircraftCreate, db: AsyncSession = Depends(get_db)):
-    await _check_spot_occupied(db, body.spot_id)
+    # Validate type_id exists
+    type_check = await db.execute(
+        text("SELECT id FROM aircraft_types WHERE id = :id"),
+        {"id": str(body.type_id)},
+    )
+    if not type_check.mappings().first():
+        raise HTTPException(status_code=400, detail="Aircraft type not found")
+
     new_id = str(uuid7())
     await db.execute(
         text(
             """
-            INSERT INTO aircraft (id, tail_number, type, operator, lat, lng, adg_class, spot_id)
-            VALUES (:id, :tail_number, :type, :operator, :lat, :lng, :adg_class, :spot_id)
+            INSERT INTO aircraft (id, tail_number, type_id, operator, lat, lng, adg_class,
+                                  heading, zone_id)
+            VALUES (:id, :tail_number, :type_id, :operator, :lat, :lng, :adg_class,
+                    :heading, :zone_id)
             """
         ),
         {
             "id": new_id,
             "tail_number": body.tail_number,
-            "type": body.type,
+            "type_id": str(body.type_id),
             "operator": body.operator,
             "lat": body.lat,
             "lng": body.lng,
             "adg_class": body.adg_class,
-            "spot_id": str(body.spot_id) if body.spot_id else None,
+            "heading": body.heading,
+            "zone_id": str(body.zone_id) if body.zone_id else None,
         },
     )
     await db.commit()
     result = await db.execute(
-        text("SELECT id, tail_number, type, operator, lat, lng, adg_class, spot_id, highlighted FROM aircraft WHERE id = :id"),
+        text(f"{_SELECT_QUERY} WHERE a.id = :id"),
         {"id": new_id},
     )
     row = result.mappings().first()
@@ -85,16 +91,16 @@ async def create_aircraft(body: AircraftCreate, db: AsyncSession = Depends(get_d
 async def move_aircraft(
     aircraft_id: UUID, body: AircraftMoveRequest, db: AsyncSession = Depends(get_db)
 ):
-    await _check_spot_occupied(db, body.spot_id, exclude_aircraft_id=aircraft_id)
     result = await db.execute(
         text(
-            "UPDATE aircraft SET lat = :lat, lng = :lng, spot_id = :spot_id, updated_at = NOW() "
-            "WHERE id = :id"
+            "UPDATE aircraft SET lat = :lat, lng = :lng, heading = :heading, "
+            "zone_id = :zone_id, updated_at = NOW() WHERE id = :id"
         ),
         {
             "lat": body.lat,
             "lng": body.lng,
-            "spot_id": str(body.spot_id) if body.spot_id else None,
+            "heading": body.heading,
+            "zone_id": str(body.zone_id) if body.zone_id else None,
             "id": str(aircraft_id),
         },
     )
@@ -102,7 +108,7 @@ async def move_aircraft(
     if result.rowcount == 0:
         raise HTTPException(status_code=404, detail="Aircraft not found")
     result = await db.execute(
-        text("SELECT id, tail_number, type, operator, lat, lng, adg_class, spot_id, highlighted FROM aircraft WHERE id = :id"),
+        text(f"{_SELECT_QUERY} WHERE a.id = :id"),
         {"id": str(aircraft_id)},
     )
     row = result.mappings().first()

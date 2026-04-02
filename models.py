@@ -2,7 +2,7 @@ from uuid_utils import uuid7
 from datetime import datetime, timezone
 from sqlalchemy import (
     Column, String, Boolean, Float, Integer, Text,
-    TIMESTAMP, ForeignKey, ARRAY,
+    TIMESTAMP, ForeignKey,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from geoalchemy2 import Geometry
@@ -36,6 +36,7 @@ class AircraftType(Base):
     designator = Column(Text)
     wingspan_m = Column(Float, nullable=False)
     length_m = Column(Float)
+    tail_height_m = Column(Float)
     adg_class = Column(Integer, ForeignKey("adg_classes.class"), nullable=False)
     created_at = Column(TIMESTAMP(timezone=True), default=_now)
     updated_at = Column(TIMESTAMP(timezone=True), default=_now, onupdate=_now)
@@ -78,34 +79,21 @@ class Zone(Base):
     updated_by = Column(Text)
 
 
-class ParkingSpot(Base):
-    __tablename__ = "parking_spots"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
-    name = Column(Text, nullable=False)
-    geometry = Column(Geometry("POLYGON", srid=4326), nullable=False)
-    accepted_classes = Column(ARRAY(Integer), nullable=False, default=[1, 2, 3, 4, 5, 6])
-    zone_id = Column(
-        UUID(as_uuid=True), ForeignKey("zones.id", ondelete="CASCADE"), nullable=True
-    )
-    created_at = Column(TIMESTAMP(timezone=True), default=_now)
-    created_by = Column(Text)
-    updated_at = Column(TIMESTAMP(timezone=True), default=_now, onupdate=_now)
-    updated_by = Column(Text)
-
-
 class Aircraft(Base):
     __tablename__ = "aircraft"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
     tail_number = Column(Text, nullable=False, unique=True)
-    type = Column(Text, nullable=False)
+    type_id = Column(
+        UUID(as_uuid=True), ForeignKey("aircraft_types.id"), nullable=False
+    )
     operator = Column(Text, nullable=False)
     lat = Column(Float, nullable=False)
     lng = Column(Float, nullable=False)
     adg_class = Column(Integer, ForeignKey("adg_classes.class"), nullable=False)
-    spot_id = Column(
-        UUID(as_uuid=True), ForeignKey("parking_spots.id", ondelete="SET NULL"), nullable=True
+    heading = Column(Float, nullable=False, default=0.0)
+    zone_id = Column(
+        UUID(as_uuid=True), ForeignKey("zones.id", ondelete="SET NULL"), nullable=True
     )
     highlighted = Column(Boolean, default=False)
     created_at = Column(TIMESTAMP(timezone=True), default=_now)

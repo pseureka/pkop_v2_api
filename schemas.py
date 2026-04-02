@@ -35,6 +35,7 @@ class AircraftTypeCreate(BaseModel):
     designator: Optional[str] = None
     wingspan_m: float
     length_m: Optional[float] = None
+    tail_height_m: Optional[float] = None
     adg_class: int
 
 
@@ -44,6 +45,7 @@ class AircraftTypeUpdate(BaseModel):
     designator: Optional[str] = None
     wingspan_m: Optional[float] = None
     length_m: Optional[float] = None
+    tail_height_m: Optional[float] = None
     adg_class: Optional[int] = None
 
 
@@ -54,6 +56,7 @@ class AircraftTypeRead(BaseModel):
     designator: Optional[str] = None
     wingspan_m: float
     length_m: Optional[float] = None
+    tail_height_m: Optional[float] = None
     adg_class: int
 
     model_config = {"from_attributes": True}
@@ -130,58 +133,40 @@ class ZoneRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# ── Parking Spots ─────────────────────────────────────────────────────────
-
-class ParkingSpotCreate(BaseModel):
-    name: str
-    coordinates: list[list[float]]
-    accepted_classes: list[int] = Field(default=[1, 2, 3, 4, 5, 6])
-    zone_id: Optional[UUID] = None
-
-
-class ParkingSpotUpdate(BaseModel):
-    name: Optional[str] = None
-    accepted_classes: Optional[list[int]] = None
-
-
-class ParkingSpotRead(BaseModel):
-    id: UUID
-    name: str
-    coordinates: list[list[float]]
-    accepted_classes: list[int]
-    zone_id: Optional[UUID] = None
-    occupied: bool = False
-
-    model_config = {"from_attributes": True}
-
-
 # ── Aircraft ──────────────────────────────────────────────────────────────
 
 class AircraftCreate(BaseModel):
     tail_number: str
-    type: str
+    type_id: UUID
     operator: str
     lat: float
     lng: float
     adg_class: int
-    spot_id: Optional[UUID] = None
+    heading: float = 0.0
+    zone_id: Optional[UUID] = None
 
 
 class AircraftMoveRequest(BaseModel):
     lat: float
     lng: float
-    spot_id: Optional[UUID] = None
+    heading: float = 0.0
+    zone_id: Optional[UUID] = None
 
 
 class AircraftRead(BaseModel):
     id: UUID
     tail_number: str
-    type: str
+    type_id: UUID
+    make: str
+    model: str
     operator: str
     lat: float
     lng: float
     adg_class: int
-    spot_id: Optional[UUID] = None
+    heading: float = 0.0
+    zone_id: Optional[UUID] = None
+    wingspan_m: float
+    length_m: Optional[float] = None
     highlighted: bool = False
 
     model_config = {"from_attributes": True}
