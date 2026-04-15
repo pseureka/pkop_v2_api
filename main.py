@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import ramps, zones, aircraft, adg_classes, aircraft_types, tail_lookup, autostack
+from routers import ramps, zones, aircraft, adg_classes, aircraft_types, tail_lookup, autostack, utilization
 
 
 app = FastAPI(title="Ramp Management API")
@@ -21,6 +21,7 @@ app.include_router(zones.router)
 app.include_router(aircraft.router)
 app.include_router(tail_lookup.router)
 app.include_router(autostack.router)
+app.include_router(utilization.router)
 
 
 @app.get("/health")

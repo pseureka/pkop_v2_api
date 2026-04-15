@@ -111,6 +111,7 @@ class ZoneCreate(BaseModel):
     ramp_id: UUID
     area_sqft: Optional[float] = None
     capacity: Optional[int] = None
+    parking_mode: str = "hangar"  # "hangar" or "ramp"
 
 
 class ZoneUpdate(BaseModel):
@@ -119,6 +120,7 @@ class ZoneUpdate(BaseModel):
     coordinates: Optional[list[list[float]]] = None
     area_sqft: Optional[float] = None
     capacity: Optional[int] = None
+    parking_mode: Optional[str] = None
 
 
 class ZoneRead(BaseModel):
@@ -129,6 +131,7 @@ class ZoneRead(BaseModel):
     ramp_id: UUID
     area_sqft: Optional[float] = None
     capacity: Optional[int] = None
+    parking_mode: str = "hangar"
 
     model_config = {"from_attributes": True}
 

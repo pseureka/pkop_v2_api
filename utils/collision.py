@@ -8,8 +8,12 @@ plus a configurable safety buffer.
 
 import math
 
-# Default safety distance in meters between aircraft
-SAFETY_BUFFER_M = 5.0
+# Default safety distance in feet between aircraft
+SAFETY_BUFFER_FT = 5.0
+FT_TO_M = 0.3048
+
+# Derived meter value for internal geometry calculations
+SAFETY_BUFFER_M = SAFETY_BUFFER_FT * FT_TO_M
 
 # Cross-shaped collision body ratios — matched to SVG with preserveAspectRatio="none".
 WING_SPAN_RATIO = 0.94

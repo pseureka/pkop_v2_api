@@ -73,6 +73,7 @@ class Zone(Base):
     )
     area_sqft = Column(Float)
     capacity = Column(Integer)
+    parking_mode = Column(Text, default="hangar")  # "hangar" or "ramp"
     created_at = Column(TIMESTAMP(timezone=True), default=_now)
     created_by = Column(Text)
     updated_at = Column(TIMESTAMP(timezone=True), default=_now, onupdate=_now)

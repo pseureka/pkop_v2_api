@@ -11,7 +11,7 @@ from utils.geometry import frontend_coords_to_wkt, wkt_to_frontend_coords
 
 router = APIRouter(prefix="/api/zones", tags=["zones"])
 
-_SELECT_COLS = "id, label, color, ramp_id, area_sqft, capacity, ST_AsText(geometry) AS geometry"
+_SELECT_COLS = "id, label, color, ramp_id, area_sqft, capacity, parking_mode, ST_AsText(geometry) AS geometry"
 
 
 def _row_to_read(row) -> ZoneRead:
@@ -24,6 +24,7 @@ def _row_to_read(row) -> ZoneRead:
         ramp_id=row["ramp_id"],
         area_sqft=row.get("area_sqft"),
         capacity=row.get("capacity"),
+        parking_mode=row.get("parking_mode") or "hangar",
     )
 
 
@@ -59,8 +60,8 @@ async def create_zone(body: ZoneCreate, db: AsyncSession = Depends(get_db)):
     await db.execute(
         text(
             """
-            INSERT INTO zones (id, label, color, geometry, ramp_id, area_sqft, capacity)
-            VALUES (:id, :label, :color, ST_GeomFromText(:wkt, 4326), :ramp_id, :area_sqft, :capacity)
+            INSERT INTO zones (id, label, color, geometry, ramp_id, area_sqft, capacity, parking_mode)
+            VALUES (:id, :label, :color, ST_GeomFromText(:wkt, 4326), :ramp_id, :area_sqft, :capacity, :parking_mode)
             """
         ),
         {
@@ -71,6 +72,7 @@ async def create_zone(body: ZoneCreate, db: AsyncSession = Depends(get_db)):
             "ramp_id": str(body.ramp_id),
             "area_sqft": body.area_sqft,
             "capacity": body.capacity,
+            "parking_mode": body.parking_mode,
         },
     )
     await db.commit()
@@ -86,7 +88,7 @@ async def update_zone(zone_id: UUID, body: ZoneUpdate, db: AsyncSession = Depend
     updates = {}
     params = {"id": str(zone_id)}
 
-    for field in ("label", "color", "area_sqft", "capacity"):
+    for field in ("label", "color", "area_sqft", "capacity", "parking_mode"):
         val = getattr(body, field)
         if val is not None:
             updates[field] = val
