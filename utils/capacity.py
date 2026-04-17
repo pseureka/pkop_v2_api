@@ -1,8 +1,6 @@
 """
 Intelligent capacity estimation — estimate how many more aircraft
 of each ADG class can fit in a zone given current occupancy.
-
-Uses Gurobi MIP optimizer for mathematically optimal results.
 """
 
 from .collision import SAFETY_BUFFER_FT
@@ -10,7 +8,8 @@ from .optimizer import optimize_capacity
 
 
 def estimate_remaining_capacity(zone_coords, parked_aircraft,
-                                adg_representative_dims, buffer_ft=SAFETY_BUFFER_FT):
+                                adg_representative_dims, buffer_ft=SAFETY_BUFFER_FT,
+                                parking_mode="hangar"):
     """Estimate how many more aircraft of each ADG class can fit.
 
     Args:
@@ -18,10 +17,11 @@ def estimate_remaining_capacity(zone_coords, parked_aircraft,
         parked_aircraft: list of dicts with lat, lng, heading, wingspan_m, length_m
         adg_representative_dims: dict { adg_class: { wingspan_m, length_m } }
         buffer_ft: safety buffer in feet
+        parking_mode: "hangar" or "ramp"
 
     Returns:
         dict { adg_class: remaining_count }
     """
     return optimize_capacity(
-        zone_coords, parked_aircraft, adg_representative_dims, buffer_ft
+        zone_coords, parked_aircraft, adg_representative_dims, buffer_ft, parking_mode
     )

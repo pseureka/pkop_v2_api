@@ -1,7 +1,7 @@
 from uuid_utils import uuid7
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, String, Boolean, Float, Integer, Text,
+    Column, String, Boolean, Float, Integer, Text, JSON,
     TIMESTAMP, ForeignKey,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -73,7 +73,7 @@ class Zone(Base):
     )
     area_sqft = Column(Float)
     capacity = Column(Integer)
-    parking_mode = Column(Text, default="hangar")  # "hangar" or "ramp"
+    capacity_data = Column(JSON)
     created_at = Column(TIMESTAMP(timezone=True), default=_now)
     created_by = Column(Text)
     updated_at = Column(TIMESTAMP(timezone=True), default=_now, onupdate=_now)

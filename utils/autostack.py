@@ -153,7 +153,7 @@ def autostack(zone_coords, aircraft_list, buffer_ft=SAFETY_BUFFER_FT,
             if ws > 0 and ln > 0 and cls not in adg_dims:
                 adg_dims[cls] = {"wingspan_m": ws, "length_m": ln}
 
-    cap = compute_zone_capacity_units(zone_coords, adg_dims, buffer_ft)
+    cap = compute_zone_capacity_units(zone_coords, adg_dims, buffer_ft, parking_mode)
 
     options = []
 
@@ -172,7 +172,7 @@ def autostack(zone_coords, aircraft_list, buffer_ft=SAFETY_BUFFER_FT,
             result = optimize_placement(
                 zone_coords, aircraft_list, parked_aircraft=None,
                 buffer_ft=buffer_ft, headings=headings,
-                time_limit=5, strategy_label=label,
+                strategy_label=label,
                 adg_weights=cap["adg_weights"], total_units=cap["total_units"],
             )
             options.append(result)

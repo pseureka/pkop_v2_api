@@ -29,6 +29,7 @@ class AutoStackFromZoneRequest(BaseModel):
     buffer_ft: float = 5.0
     headings: Optional[list[float]] = None
     num_options: int = 3
+    parking_mode: str = "hangar"
 
 
 @router.post("/compute")
@@ -96,7 +97,7 @@ async def autostack_existing(zone_id: UUID, body: AutoStackFromZoneRequest, db: 
     """
     # Get zone polygon
     result = await db.execute(
-        text("SELECT ST_AsText(geometry) AS wkt, parking_mode FROM zones WHERE id = :zid"),
+        text("SELECT ST_AsText(geometry) AS wkt FROM zones WHERE id = :zid"),
         {"zid": str(zone_id)},
     )
     zone_row = result.mappings().first()
@@ -104,7 +105,7 @@ async def autostack_existing(zone_id: UUID, body: AutoStackFromZoneRequest, db: 
         raise HTTPException(status_code=404, detail="Zone not found")
 
     zone_coords = wkt_to_frontend_coords(zone_row["wkt"])
-    parking_mode = zone_row.get("parking_mode") or "hangar"
+    parking_mode = body.parking_mode
 
     # Get aircraft in zone with dimensions from aircraft_types
     ac_result = await db.execute(

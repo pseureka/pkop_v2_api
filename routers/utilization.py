@@ -1,3 +1,4 @@
+import time
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,7 +10,9 @@ from utils.geometry import wkt_to_frontend_coords
 from utils.optimizer import (
     compute_zone_capacity_units,
     _greedy_fill, _greedy_fill_with_positions,
-    _build_parked_obbs, OPERATIONAL_HEADINGS,
+    _greedy_fill_ramp, _greedy_fill_ramp_with_positions,
+    _build_parked_obbs, _find_primary_axis,
+    OPERATIONAL_HEADINGS,
 )
 from utils.autostack import autostack as run_autostack
 from utils.collision import _lat_lng_to_meters, FT_TO_M
@@ -32,6 +35,28 @@ async def _get_adg_dims(db):
         int(r["adg_class"]): {"wingspan_m": float(r["avg_ws"]), "length_m": float(r["avg_ln"])}
         for r in result.mappings().all()
     }
+
+
+def _load_capacity_units(capacity_data, zone_coords, adg_dims, buffer_ft, parking_mode):
+    """Return {total_units, max_by_adg, adg_weights} for a zone.
+    Prefers the cached capacity_data[mode] when its buffer_ft matches; otherwise
+    falls through to compute_zone_capacity_units.
+    """
+    cached = capacity_data
+    if cached and isinstance(cached, str):
+        import json as _json
+        cached = _json.loads(cached)
+    print(f"[cache] _load_capacity_units mode={parking_mode} req_buf={buffer_ft}({type(buffer_ft).__name__}) cached_keys={list(cached.keys()) if cached else None} cached_buf={cached[parking_mode].get('buffer_ft') if cached and parking_mode in cached else None}({type(cached[parking_mode].get('buffer_ft')).__name__ if cached and parking_mode in cached else 'None'})", flush=True)
+    if cached and parking_mode in cached and cached[parking_mode].get("buffer_ft") == buffer_ft:
+        mode_cache = cached[parking_mode]
+        print(f"[cache] HIT — skipping compute_zone_capacity_units", flush=True)
+        return {
+            "total_units": mode_cache["total_units"],
+            "max_by_adg": {int(k): v for k, v in mode_cache["max_by_adg"].items()},
+            "adg_weights": {int(k): v for k, v in mode_cache["adg_weights"].items()},
+        }
+    print(f"[cache] MISS — computing fresh", flush=True)
+    return compute_zone_capacity_units(zone_coords, adg_dims, buffer_ft, parking_mode)
 
 
 @router.get("")
@@ -147,12 +172,15 @@ async def get_utilization(
 async def get_zone_capacity(
     zone_id: UUID,
     buffer_ft: float = Query(5.0, ge=0, le=50),
+    parking_mode: str = Query("hangar"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Full capacity breakdown for a zone — max fit, weights, remaining per ADG class."""
+    """Full capacity breakdown for a zone — max fit, weights, remaining per ADG class.
+    parking_mode: 'hangar' (free-form greedy) or 'ramp' (row-column grid).
+    Uses cached capacity_data from DB if available for the requested mode/buffer."""
 
     zone_result = await db.execute(
-        text("SELECT id, ST_AsText(geometry) AS geometry FROM zones WHERE id = :id"),
+        text("SELECT id, ST_AsText(geometry) AS geometry, capacity_data FROM zones WHERE id = :id"),
         {"id": str(zone_id)},
     )
     zone_row = zone_result.mappings().first()
@@ -171,8 +199,9 @@ async def get_zone_capacity(
 
     adg_dims = await _get_adg_dims(db)
 
-    # Capacity units (max per ADG on empty zone)
-    cap = compute_zone_capacity_units(zone_coords, adg_dims, buffer_ft)
+    cap = _load_capacity_units(
+        zone_row.get("capacity_data"), zone_coords, adg_dims, buffer_ft, parking_mode
+    )
     total_units = cap["total_units"]
     max_by_adg = cap["max_by_adg"]
     adg_weights = cap["adg_weights"]
@@ -230,6 +259,7 @@ async def get_zone_capacity(
 
 class OptimizeAnalysisRequest(BaseModel):
     buffer_ft: float = 5.0
+    parking_mode: str = "hangar"
 
 
 @router.post("/zones/{zone_id}/optimize-analysis")
@@ -242,8 +272,9 @@ async def optimize_analysis(
 
     Returns fits_now (unit-based) and fits_after_autostack (spatial, after optimization).
     """
+    _t_endpoint = time.perf_counter()
     zone_result = await db.execute(
-        text("SELECT id, ST_AsText(geometry) AS geometry, parking_mode FROM zones WHERE id = :id"),
+        text("SELECT id, ST_AsText(geometry) AS geometry, capacity_data FROM zones WHERE id = :id"),
         {"id": str(zone_id)},
     )
     zone_row = zone_result.mappings().first()
@@ -251,7 +282,7 @@ async def optimize_analysis(
         raise HTTPException(status_code=404, detail="Zone not found")
 
     zone_coords = wkt_to_frontend_coords(str(zone_row["geometry"]))
-    parking_mode = zone_row.get("parking_mode") or "hangar"
+    parking_mode = body.parking_mode
 
     ac_result = await db.execute(text(
         """SELECT a.tail_number, a.lat, a.lng, a.heading, a.adg_class,
@@ -265,8 +296,10 @@ async def optimize_analysis(
     adg_dims = await _get_adg_dims(db)
     buffer_m = body.buffer_ft * FT_TO_M
 
-    # Capacity units for "fits now" (unit-based, instant)
-    cap = compute_zone_capacity_units(zone_coords, adg_dims, body.buffer_ft)
+    # Capacity units for "fits now" — prefer DB cache, matches /capacity endpoint
+    cap = _load_capacity_units(
+        zone_row.get("capacity_data"), zone_coords, adg_dims, body.buffer_ft, parking_mode
+    )
     adg_weights = cap["adg_weights"]
     total_units = cap["total_units"]
 
@@ -286,6 +319,7 @@ async def optimize_analysis(
     ]
 
     if not aircraft_list:
+        print(f"[endpoint] optimize-analysis zone={zone_id} mode={parking_mode} buffer_ft={body.buffer_ft} parked=0 total={time.perf_counter()-_t_endpoint:.3f}s (no-aircraft fast path)", flush=True)
         return {
             "zone_id": str(zone_id),
             "fits_now": fits_now,
@@ -308,6 +342,14 @@ async def optimize_analysis(
     optimized_obbs = _build_parked_obbs(
         autostack_result["placements"], ref_lat, ref_lng, buffer_m)
 
+    # Mode-aware headings and fill functions
+    if parking_mode == "ramp":
+        primary_axis = _find_primary_axis(zone_m)
+        fill_headings = [(primary_axis + 90) % 360, (primary_axis + 270) % 360]
+    else:
+        primary_axis = 0
+        fill_headings = OPERATIONAL_HEADINGS
+
     # Greedy fill per ADG on optimized arrangement
     fits_after = {}
     for cls, dims in adg_dims.items():
@@ -316,9 +358,14 @@ async def optimize_analysis(
         if ws <= 0 or ln <= 0:
             fits_after[cls] = 0
             continue
-        fits_after[cls] = _greedy_fill(
-            zone_m, zone_bounds, optimized_obbs,
-            ws, ln, OPERATIONAL_HEADINGS, buffer_m, max_count=30)
+        if parking_mode == "ramp":
+            fits_after[cls] = _greedy_fill_ramp(
+                zone_m, zone_bounds, optimized_obbs,
+                ws, ln, fill_headings, buffer_m, primary_axis, max_count=30)
+        else:
+            fits_after[cls] = _greedy_fill(
+                zone_m, zone_bounds, optimized_obbs,
+                ws, ln, fill_headings, buffer_m, max_count=30)
 
     total_now = sum(fits_now.values())
     total_after = sum(fits_after.values())
@@ -334,11 +381,18 @@ async def optimize_analysis(
     # Additional ADG-I aircraft filling remaining space (green ghosts)
     if 1 in adg_dims:
         dims1 = adg_dims[1]
-        additional = _greedy_fill_with_positions(
-            zone_m, zone_bounds, optimized_obbs,
-            dims1["wingspan_m"], dims1["length_m"],
-            OPERATIONAL_HEADINGS, buffer_m,
-            max_count=20, ref_lat=ref_lat, ref_lng=ref_lng, adg_class=1)
+        if parking_mode == "ramp":
+            additional = _greedy_fill_ramp_with_positions(
+                zone_m, zone_bounds, optimized_obbs,
+                dims1["wingspan_m"], dims1["length_m"],
+                fill_headings, buffer_m, primary_axis,
+                max_count=20, ref_lat=ref_lat, ref_lng=ref_lng, adg_class=1)
+        else:
+            additional = _greedy_fill_with_positions(
+                zone_m, zone_bounds, optimized_obbs,
+                dims1["wingspan_m"], dims1["length_m"],
+                fill_headings, buffer_m,
+                max_count=20, ref_lat=ref_lat, ref_lng=ref_lng, adg_class=1)
         for i, pos in enumerate(additional):
             preview_placements.append({
                 **pos,
@@ -346,6 +400,7 @@ async def optimize_analysis(
                 "type": "additional",
             })
 
+    print(f"[endpoint] optimize-analysis zone={zone_id} mode={parking_mode} buffer_ft={body.buffer_ft} parked={len(aircraft_list)} total={time.perf_counter()-_t_endpoint:.3f}s", flush=True)
     return {
         "zone_id": str(zone_id),
         "fits_now": fits_now,
