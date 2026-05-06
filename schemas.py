@@ -173,3 +173,24 @@ class AircraftRead(BaseModel):
     highlighted: bool = False
 
     model_config = {"from_attributes": True}
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class UserRead(BaseModel):
+    id: UUID
+    username: str
+    role: str
+
+    model_config = {"from_attributes": True}
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserRead

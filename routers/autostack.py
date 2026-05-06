@@ -11,6 +11,7 @@ from typing import Optional
 
 from database import get_db
 from utils.autostack import autostack
+from utils.clearance import ClearancePolicyOverride, policy_from_request
 from utils.geometry import wkt_to_frontend_coords
 
 router = APIRouter(prefix="/api/autostack", tags=["autostack"])
@@ -22,6 +23,7 @@ class AutoStackRequest(BaseModel):
     buffer_ft: float = 5.0
     headings: Optional[list[float]] = None
     num_options: int = 3
+    clearance_policy: Optional[ClearancePolicyOverride] = None
 
 
 class AutoStackFromZoneRequest(BaseModel):
@@ -30,6 +32,7 @@ class AutoStackFromZoneRequest(BaseModel):
     headings: Optional[list[float]] = None
     num_options: int = 3
     parking_mode: str = "hangar"
+    clearance_policy: Optional[ClearancePolicyOverride] = None
 
 
 @router.post("/compute")
@@ -75,12 +78,13 @@ async def compute_autostack(body: AutoStackRequest, db: AsyncSession = Depends(g
             "adg_class": ac.get("adg_class", 2),
         })
 
+    policy = policy_from_request(body.buffer_ft, body.clearance_policy)
     options = autostack(
         zone_coords,
         enriched,
-        buffer_ft=body.buffer_ft,
         headings_to_try=body.headings,
         num_options=body.num_options,
+        policy=policy,
     )
 
     return {
@@ -146,14 +150,15 @@ async def autostack_existing(zone_id: UUID, body: AutoStackFromZoneRequest, db: 
         for r in adg_result.mappings().all()
     }
 
+    policy = policy_from_request(body.buffer_ft, body.clearance_policy)
     options = autostack(
         zone_coords,
         aircraft_list,
-        buffer_ft=body.buffer_ft,
         headings_to_try=body.headings,
         num_options=body.num_options,
         adg_dims=adg_dims,
         parking_mode=parking_mode,
+        policy=policy,
     )
 
     return {
