@@ -111,6 +111,8 @@ class ZoneCreate(BaseModel):
     ramp_id: UUID
     area_sqft: Optional[float] = None
     capacity: Optional[int] = None
+    parking_mode: str = "hangar"
+    buffer_ft: float = 5.0
 
 
 class ZoneUpdate(BaseModel):
@@ -129,6 +131,7 @@ class ZoneRead(BaseModel):
     ramp_id: UUID
     area_sqft: Optional[float] = None
     capacity: Optional[int] = None
+    capacity_data: Optional[dict] = None
 
     model_config = {"from_attributes": True}
 
@@ -170,3 +173,24 @@ class AircraftRead(BaseModel):
     highlighted: bool = False
 
     model_config = {"from_attributes": True}
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class UserRead(BaseModel):
+    id: UUID
+    username: str
+    role: str
+
+    model_config = {"from_attributes": True}
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserRead

@@ -1,8 +1,8 @@
 from uuid_utils import uuid7
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, String, Boolean, Float, Integer, Text,
-    TIMESTAMP, ForeignKey,
+    Column, String, Boolean, Float, Integer, Text, JSON,
+    TIMESTAMP, ForeignKey, CheckConstraint,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from geoalchemy2 import Geometry
@@ -73,6 +73,7 @@ class Zone(Base):
     )
     area_sqft = Column(Float)
     capacity = Column(Integer)
+    capacity_data = Column(JSON)
     created_at = Column(TIMESTAMP(timezone=True), default=_now)
     created_by = Column(Text)
     updated_at = Column(TIMESTAMP(timezone=True), default=_now, onupdate=_now)
@@ -100,3 +101,18 @@ class Aircraft(Base):
     created_by = Column(Text)
     updated_at = Column(TIMESTAMP(timezone=True), default=_now, onupdate=_now)
     updated_by = Column(Text)
+
+
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint("role IN ('Admin','Reader')", name="users_role_check"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid7)
+    username = Column(Text, nullable=False, unique=True)
+    password_hash = Column(Text, nullable=False)
+    role = Column(Text, nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(TIMESTAMP(timezone=True), default=_now)
+    updated_at = Column(TIMESTAMP(timezone=True), default=_now, onupdate=_now)

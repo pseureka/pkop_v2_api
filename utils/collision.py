@@ -1,15 +1,19 @@
 """
 OBB-based collision detection for aircraft placement using Separating Axis Theorem.
 
-Inspired by swarm drone landing algorithms — each aircraft is modeled as an
-oriented bounding box (OBB) defined by position, heading, wingspan, and length,
-plus a configurable safety buffer.
+Each aircraft is modeled as a composite of two body OBBs (fuselage + wings)
+plus two buffered OBBs (component-aware safety envelopes). Clearance is
+governed by `ClearancePolicy` — see utils/CLEARANCE.md.
 """
 
 import math
 
-# Default safety distance in meters between aircraft
-SAFETY_BUFFER_M = 5.0
+from .clearance import ClearancePolicy, FT_TO_M
+
+# Legacy single-buffer constant — preserved for any code that still imports it
+# (e.g. UI default sliders, test fixtures). New code should use ClearancePolicy.
+SAFETY_BUFFER_FT = 5.0
+SAFETY_BUFFER_M = SAFETY_BUFFER_FT * FT_TO_M
 
 # Cross-shaped collision body ratios — matched to SVG with preserveAspectRatio="none".
 WING_SPAN_RATIO = 0.94
@@ -34,16 +38,17 @@ def _lat_lng_to_meters(lat, lng, ref_lat, ref_lng):
     return dx, dy
 
 
-def _compute_obb_corners(cx, cy, heading_deg, wingspan, length, buffer=SAFETY_BUFFER_M):
+def _compute_obb_corners(cx, cy, heading_deg, width, length,
+                         lateral_margin=0.0, longitudinal_margin=0.0):
     """Compute 4 corners of an oriented bounding box in local meter coords.
 
     heading=0 means nose points north (+y direction).
-    Wingspan is perpendicular to heading, length is along heading.
-    Buffer is added to both dimensions (half on each side).
+    `width` is perpendicular to heading (lateral); `length` is along heading.
+    Margins are PER-SIDE inflations: `width + 2*lateral_margin` total.
     """
     rad = math.radians(heading_deg)
-    hw = (wingspan + buffer) / 2.0  # half-width (perpendicular to heading)
-    hl = (length + buffer) / 2.0    # half-length (along heading)
+    hw = width / 2.0 + lateral_margin       # half-width perpendicular to heading
+    hl = length / 2.0 + longitudinal_margin  # half-length along heading
 
     cos_h = math.cos(rad)
     sin_h = math.sin(rad)
@@ -55,6 +60,56 @@ def _compute_obb_corners(cx, cy, heading_deg, wingspan, length, buffer=SAFETY_BU
         (cx - hl * sin_h - hw * cos_h, cy - hl * cos_h + hw * sin_h),
         (cx - hl * sin_h + hw * cos_h, cy - hl * cos_h - hw * sin_h),
     ]
+
+
+def build_aircraft_obbs(cx, cy, heading_deg, wingspan, length,
+                        policy=None):
+    """Build the 4 OBBs for an aircraft at (cx, cy) with the given policy.
+
+    Returns dict with keys: fuselage, wings, fuselage_buffered, wings_buffered.
+    fuselage/wings are unbuffered body shapes; the *_buffered variants apply
+    per-component, per-axis margins from the policy.
+    """
+    if policy is None:
+        policy = ClearancePolicy.DEFAULT
+
+    fuselage_w = wingspan * FUSELAGE_WIDTH_RATIO
+    fuselage_l = length * FUSELAGE_LENGTH_RATIO
+    wings_w = wingspan * WING_SPAN_RATIO
+    wings_l = length * WING_CHORD_RATIO
+
+    return {
+        "fuselage": _compute_obb_corners(cx, cy, heading_deg, fuselage_w, fuselage_l),
+        "wings": _compute_obb_corners(cx, cy, heading_deg, wings_w, wings_l),
+        "fuselage_buffered": _compute_obb_corners(
+            cx, cy, heading_deg, fuselage_w, fuselage_l,
+            lateral_margin=policy.fuselage_lateral_m,
+            longitudinal_margin=policy.fuselage_longitudinal_m,
+        ),
+        "wings_buffered": _compute_obb_corners(
+            cx, cy, heading_deg, wings_w, wings_l,
+            lateral_margin=policy.wing_lateral_m,
+            longitudinal_margin=policy.wing_longitudinal_m,
+        ),
+    }
+
+
+def aircraft_obbs_collide(a, b):
+    """Symmetric four-shape collision predicate.
+
+    A collision occurs when ANY body OBB of one aircraft intrudes into ANY
+    buffered OBB of the other. Buffer-buffer overlap is allowed.
+    """
+    return (
+        _obb_overlap(a["fuselage"], b["fuselage_buffered"]) or
+        _obb_overlap(a["fuselage"], b["wings_buffered"]) or
+        _obb_overlap(a["wings"], b["fuselage_buffered"]) or
+        _obb_overlap(a["wings"], b["wings_buffered"]) or
+        _obb_overlap(b["fuselage"], a["fuselage_buffered"]) or
+        _obb_overlap(b["fuselage"], a["wings_buffered"]) or
+        _obb_overlap(b["wings"], a["fuselage_buffered"]) or
+        _obb_overlap(b["wings"], a["wings_buffered"])
+    )
 
 
 def _get_axes(corners):
@@ -107,23 +162,26 @@ def _obb_inside_polygon(corners, polygon):
     return all(_point_in_polygon(c[0], c[1], polygon) for c in corners)
 
 
-def check_placement(moving, others, zone_coords, buffer_m=SAFETY_BUFFER_M):
+def check_placement(moving, others, zone_coords, policy=None):
     """Full placement validation.
 
-    Collision rule: a plane's body entering another plane's buffer zone is
-    a collision. Two buffer zones merely overlapping is NOT a collision.
+    Collision rule: any body OBB of one aircraft intrudes any buffered OBB of
+    the other. Buffer-buffer overlap is NOT a collision. Symmetric.
 
     Args:
         moving: dict with lat, lng, heading, wingspan_m, length_m
         others: list of dicts with lat, lng, heading, wingspan_m, length_m, tail_number
-        zone_coords: [[lat, lng], ...] polygon of the zone
-        buffer_m: safety distance in meters
+        zone_coords: [[lat, lng], ...] polygon of the zone (currently unused)
+        policy: ClearancePolicy (defaults to ClearancePolicy.DEFAULT)
 
     Returns:
         (valid: bool, reason: str|None, conflict_tail: str|None)
     """
     if not others:
         return True, None, None
+
+    if policy is None:
+        policy = ClearancePolicy.DEFAULT
 
     ref_lat = moving["lat"]
     ref_lng = moving["lng"]
@@ -135,10 +193,7 @@ def check_placement(moving, others, zone_coords, buffer_m=SAFETY_BUFFER_M):
     if m_ws is None:
         return True, None, None
 
-    m_heading = moving["heading"]
-    moving_fuselage = _compute_obb_corners(mx, my, m_heading, m_ws * FUSELAGE_WIDTH_RATIO, m_ln * FUSELAGE_LENGTH_RATIO, 0)
-    moving_wings = _compute_obb_corners(mx, my, m_heading, m_ws * WING_SPAN_RATIO, m_ln * WING_CHORD_RATIO, 0)
-    moving_buffered = _compute_obb_corners(mx, my, m_heading, m_ws, m_ln, buffer_m)
+    moving_obbs = build_aircraft_obbs(mx, my, moving["heading"], m_ws, m_ln, policy)
 
     for other in others:
         o_ws, o_ln = get_effective_dimensions(
@@ -148,15 +203,11 @@ def check_placement(moving, others, zone_coords, buffer_m=SAFETY_BUFFER_M):
             continue
 
         ox, oy = _lat_lng_to_meters(other["lat"], other["lng"], ref_lat, ref_lng)
-        o_heading = other.get("heading", 0.0)
-        other_fuselage = _compute_obb_corners(ox, oy, o_heading, o_ws * FUSELAGE_WIDTH_RATIO, o_ln * FUSELAGE_LENGTH_RATIO, 0)
-        other_wings = _compute_obb_corners(ox, oy, o_heading, o_ws * WING_SPAN_RATIO, o_ln * WING_CHORD_RATIO, 0)
-        other_buffered = _compute_obb_corners(ox, oy, o_heading, o_ws, o_ln, buffer_m)
+        other_obbs = build_aircraft_obbs(
+            ox, oy, other.get("heading", 0.0), o_ws, o_ln, policy,
+        )
 
-        if (
-            _obb_overlap(moving_fuselage, other_buffered) or _obb_overlap(moving_wings, other_buffered) or
-            _obb_overlap(other_fuselage, moving_buffered) or _obb_overlap(other_wings, moving_buffered)
-        ):
+        if aircraft_obbs_collide(moving_obbs, other_obbs):
             return False, "collision", other.get("tail_number", "unknown")
 
     return True, None, None

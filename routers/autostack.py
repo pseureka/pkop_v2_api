@@ -11,6 +11,7 @@ from typing import Optional
 
 from database import get_db
 from utils.autostack import autostack
+from utils.clearance import ClearancePolicyOverride, policy_from_request
 from utils.geometry import wkt_to_frontend_coords
 
 router = APIRouter(prefix="/api/autostack", tags=["autostack"])
@@ -19,16 +20,19 @@ router = APIRouter(prefix="/api/autostack", tags=["autostack"])
 class AutoStackRequest(BaseModel):
     zone_id: UUID
     aircraft: list[dict]  # [{ tail_number, wingspan_m, length_m, adg_class }]
-    buffer_m: float = 5.0
+    buffer_ft: float = 5.0
     headings: Optional[list[float]] = None
     num_options: int = 3
+    clearance_policy: Optional[ClearancePolicyOverride] = None
 
 
 class AutoStackFromZoneRequest(BaseModel):
     zone_id: UUID
-    buffer_m: float = 5.0
+    buffer_ft: float = 5.0
     headings: Optional[list[float]] = None
     num_options: int = 3
+    parking_mode: str = "hangar"
+    clearance_policy: Optional[ClearancePolicyOverride] = None
 
 
 @router.post("/compute")
@@ -74,12 +78,13 @@ async def compute_autostack(body: AutoStackRequest, db: AsyncSession = Depends(g
             "adg_class": ac.get("adg_class", 2),
         })
 
+    policy = policy_from_request(body.buffer_ft, body.clearance_policy)
     options = autostack(
         zone_coords,
         enriched,
-        buffer_m=body.buffer_m,
         headings_to_try=body.headings,
         num_options=body.num_options,
+        policy=policy,
     )
 
     return {
@@ -104,6 +109,7 @@ async def autostack_existing(zone_id: UUID, body: AutoStackFromZoneRequest, db: 
         raise HTTPException(status_code=404, detail="Zone not found")
 
     zone_coords = wkt_to_frontend_coords(zone_row["wkt"])
+    parking_mode = body.parking_mode
 
     # Get aircraft in zone with dimensions from aircraft_types
     ac_result = await db.execute(
@@ -133,12 +139,26 @@ async def autostack_existing(zone_id: UUID, body: AutoStackFromZoneRequest, db: 
             "adg_class": ac["adg_class"],
         })
 
+    # Get ADG average dims for capacity unit calculation
+    adg_result = await db.execute(text(
+        """SELECT adg_class, AVG(wingspan_m) AS avg_ws,
+                  AVG(COALESCE(length_m, wingspan_m * 0.85)) AS avg_ln
+           FROM aircraft_types GROUP BY adg_class ORDER BY adg_class"""
+    ))
+    adg_dims = {
+        int(r["adg_class"]): {"wingspan_m": float(r["avg_ws"]), "length_m": float(r["avg_ln"])}
+        for r in adg_result.mappings().all()
+    }
+
+    policy = policy_from_request(body.buffer_ft, body.clearance_policy)
     options = autostack(
         zone_coords,
         aircraft_list,
-        buffer_m=body.buffer_m,
         headings_to_try=body.headings,
         num_options=body.num_options,
+        adg_dims=adg_dims,
+        parking_mode=parking_mode,
+        policy=policy,
     )
 
     return {

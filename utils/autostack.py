@@ -2,24 +2,21 @@
 AutoStack — automated aircraft placement within zones.
 
 Given a zone polygon and a list of aircraft to place, computes optimal
-positions and headings to maximize space utilization while maintaining
-safety clearances.
-
-Algorithm: grid-based placement with oriented bounding box collision
-detection. Tries multiple headings and positions, ranks by utilization.
+positions and headings to maximize space utilization while respecting the
+component-aware ClearancePolicy.
 """
 
 import math
+from .clearance import ClearancePolicy
 from .collision import (
     _lat_lng_to_meters,
-    _compute_obb_corners,
     _obb_overlap,
     _point_in_polygon,
+    aircraft_obbs_collide,
+    build_aircraft_obbs,
+    SAFETY_BUFFER_FT,
     SAFETY_BUFFER_M,
-    WING_SPAN_RATIO,
-    WING_CHORD_RATIO,
-    FUSELAGE_WIDTH_RATIO,
-    FUSELAGE_LENGTH_RATIO,
+    FT_TO_M,
     get_effective_dimensions,
 )
 
@@ -51,149 +48,102 @@ def _obb_inside_polygon(corners, polygon):
     return all(_point_in_polygon(c[0], c[1], polygon) for c in corners)
 
 
-def autostack(zone_coords, aircraft_list, buffer_m=SAFETY_BUFFER_M,
-              headings_to_try=None, num_options=3):
+def _try_place_single(zone_m, zone_bounds, placed_items, wingspan, length,
+                      headings, policy):
+    """Try to place a single aircraft in the zone using grid scan.
+
+    `placed_items` are 4-shape OBB dicts (built via `build_aircraft_obbs`).
+    Returns (x, y, heading) if a non-colliding position fits, else None.
+    """
+    min_x, min_y, max_x, max_y = zone_bounds
+    step = min(wingspan, length) * 0.6
+    boundary_m = max(policy.boundary_lateral_m, policy.boundary_longitudinal_m)
+
+    y = min_y + length / 2 + boundary_m
+    while y <= max_y - length / 2 - boundary_m:
+        x = min_x + wingspan / 2 + boundary_m
+        while x <= max_x - wingspan / 2 - boundary_m:
+            for heading in headings:
+                cand_obbs = build_aircraft_obbs(x, y, heading, wingspan, length, policy)
+
+                if not (
+                    _obb_inside_polygon(cand_obbs["fuselage_buffered"], zone_m) and
+                    _obb_inside_polygon(cand_obbs["wings_buffered"], zone_m)
+                ):
+                    continue
+
+                collision = False
+                for existing in placed_items:
+                    if aircraft_obbs_collide(cand_obbs, existing):
+                        collision = True
+                        break
+
+                if not collision:
+                    return x, y, heading
+
+            x += step
+        y += step
+
+    return None
+
+
+def autostack(zone_coords, aircraft_list, buffer_ft=SAFETY_BUFFER_FT,
+              headings_to_try=None, num_options=3, adg_dims=None,
+              parking_mode="hangar", cap=None, policy=None):
     """
     Compute optimal placement for aircraft within a zone.
 
-    Args:
-        zone_coords: [[lat, lng], ...] zone polygon
-        aircraft_list: [{ wingspan_m, length_m, tail_number, adg_class }, ...]
-            Sorted by priority (largest first recommended)
-        buffer_m: safety distance in meters
-        headings_to_try: list of headings to attempt (degrees), default [0, 90, 180, 270]
-        num_options: number of layout options to generate
+    Two modes:
+      - "hangar": OR-Tools CP-SAT optimization (tight packing)
+      - "ramp": Row-based layout along primary axis (organized rows)
 
-    Returns:
-        list of layout options, each:
-        {
-            "utilization": float (0-100),
-            "placements": [{ tail_number, lat, lng, heading, wingspan_m, length_m }, ...],
-            "unplaced": [tail_numbers that didn't fit],
-        }
+    Pass `policy` directly, or `buffer_ft` for the legacy uniform-scale shim.
     """
+    from .optimizer import optimize_placement, optimize_placement_ramp
+
+    if policy is None:
+        policy = ClearancePolicy.from_buffer_ft(buffer_ft)
+
     if not zone_coords or len(zone_coords) < 3:
         return []
     if not aircraft_list:
         return [{"utilization": 0, "placements": [], "unplaced": []}]
 
-    if headings_to_try is None:
-        headings_to_try = [0, 90, 180, 270]
+    from .optimizer import HEADING_STRATEGIES, RAMP_STRATEGIES, compute_zone_capacity_units
 
-    ref_lat, ref_lng = _polygon_centroid(zone_coords)
+    if adg_dims is None:
+        adg_dims = {}
+        for ac in aircraft_list:
+            cls = ac.get("adg_class", 2)
+            ws = ac.get("wingspan_m", 0)
+            ln = ac.get("length_m", 0)
+            if ws > 0 and ln > 0 and cls not in adg_dims:
+                adg_dims[cls] = {"wingspan_m": ws, "length_m": ln}
 
-    # Convert zone to meters
-    zone_m = [_lat_lng_to_meters(c[0], c[1], ref_lat, ref_lng) for c in zone_coords]
-    min_x, min_y, max_x, max_y = _polygon_bounds(zone_m)
-
-    # Zone area for utilization calculation
-    zone_area = _shoelace_area(zone_m)
-
-    # Filter out aircraft without real dimensions
-    valid_aircraft = [
-        a for a in aircraft_list
-        if a.get("wingspan_m") and a.get("length_m")
-    ]
-
-    # Sort aircraft largest first (by area = wingspan * length)
-    sorted_aircraft = sorted(
-        valid_aircraft,
-        key=lambda a: a["wingspan_m"] * a["length_m"],
-        reverse=True,
-    )
+    if cap is None:
+        cap = compute_zone_capacity_units(zone_coords, adg_dims, parking_mode=parking_mode, policy=policy)
+    else:
+        print(f"[memo] autostack reused pre-computed cap (skipped compute_zone_capacity_units)", flush=True)
 
     options = []
 
-    # Generate multiple options with different heading strategies
-    heading_strategies = []
-    for primary_heading in headings_to_try[:num_options]:
-        heading_strategies.append([primary_heading])
-    # Also try mixed headings
-    if num_options > len(headings_to_try):
-        heading_strategies.append(headings_to_try)
+    if parking_mode == "ramp":
+        for label, _ in RAMP_STRATEGIES[:num_options]:
+            result = optimize_placement_ramp(
+                zone_coords, aircraft_list, parked_aircraft=None,
+                strategy_label=label, policy=policy,
+                adg_weights=cap["adg_weights"], total_units=cap["total_units"],
+            )
+            options.append(result)
+    else:
+        for label, headings in HEADING_STRATEGIES[:num_options]:
+            result = optimize_placement(
+                zone_coords, aircraft_list, parked_aircraft=None,
+                headings=headings, strategy_label=label, policy=policy,
+                adg_weights=cap["adg_weights"], total_units=cap["total_units"],
+            )
+            options.append(result)
 
-    for strategy in heading_strategies[:num_options]:
-        placements = []
-        placed_items = []  # list of { body, buffered } OBBs
-        unplaced = []
-        total_aircraft_area = 0
-
-        for ac in sorted_aircraft:
-            ws, ln = ac["wingspan_m"], ac["length_m"]
-            placed = False
-
-            # Try each heading in this strategy
-            for heading in (strategy if len(strategy) > 1 else strategy * 4):
-                if placed:
-                    break
-
-                # Grid step: use smaller of wingspan/length for finer resolution
-                step = min(ws, ln) * 0.6
-
-                # Scan grid within zone bounds
-                y = min_y + ln / 2 + buffer_m
-                while y <= max_y - ln / 2 - buffer_m:
-                    if placed:
-                        break
-                    x = min_x + ws / 2 + buffer_m
-                    while x <= max_x - ws / 2 - buffer_m:
-                        candidate_fuselage = _compute_obb_corners(x, y, heading, ws * FUSELAGE_WIDTH_RATIO, ln * FUSELAGE_LENGTH_RATIO, 0)
-                        candidate_wings = _compute_obb_corners(x, y, heading, ws * WING_SPAN_RATIO, ln * WING_CHORD_RATIO, 0)
-                        candidate_buffered = _compute_obb_corners(x, y, heading, ws, ln, buffer_m)
-
-                        # Check inside zone (buffered OBB must fit)
-                        if not _obb_inside_polygon(candidate_buffered, zone_m):
-                            x += step
-                            continue
-
-                        # Check collision: fuselage or wings enters other's buffer or vice versa
-                        collision = False
-                        for existing in placed_items:
-                            if (
-                                _obb_overlap(candidate_fuselage, existing["buffered"]) or
-                                _obb_overlap(candidate_wings, existing["buffered"]) or
-                                _obb_overlap(existing["fuselage"], candidate_buffered) or
-                                _obb_overlap(existing["wings"], candidate_buffered)
-                            ):
-                                collision = True
-                                break
-
-                        if not collision:
-                            lat, lng = _meters_to_latlng(x, y, ref_lat, ref_lng)
-                            placements.append({
-                                "tail_number": ac.get("tail_number", ""),
-                                "lat": lat,
-                                "lng": lng,
-                                "heading": heading,
-                                "wingspan_m": ws,
-                                "length_m": ln,
-                                "adg_class": ac.get("adg_class", 2),
-                            })
-                            placed_items.append({
-                                "fuselage": candidate_fuselage,
-                                "wings": candidate_wings,
-                                "buffered": candidate_buffered,
-                            })
-                            total_aircraft_area += ws * ln
-                            placed = True
-                            break
-
-                        x += step
-                    y += step
-
-            if not placed:
-                unplaced.append(ac.get("tail_number", "unknown"))
-
-        utilization = (total_aircraft_area / zone_area * 100) if zone_area > 0 else 0
-
-        options.append({
-            "utilization": round(utilization, 1),
-            "placements": placements,
-            "unplaced": unplaced,
-            "heading_strategy": strategy[0] if len(strategy) == 1 else "mixed",
-        })
-
-    # Sort by utilization (best first), then by fewest unplaced
     options.sort(key=lambda o: (-len(o["placements"]), -o["utilization"]))
 
     return options[:num_options]
